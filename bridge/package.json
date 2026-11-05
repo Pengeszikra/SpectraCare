@@ -1,0 +1,1 @@
+{"name":"spectra-sdk-bridge","private":true,"type":"module","scripts":{"start":"node server.mjs"},"dependencies":{"@smartspectra/node-sdk":"3.4.0","sharp":"^0.34.5","ws":"^8.18.3"}}

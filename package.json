@@ -1,0 +1,1 @@
+{"name":"spectra-field-lab","version":"0.1.0","private":true,"type":"module","scripts":{"build":"node scripts/build.mjs","check":"tspipe --noEmit","test":"node --test tests/*.test.mjs"},"devDependencies":{"@pengeszikra/typescript":"7.1.0-pipeline.1","@tailwindcss/cli":"4.3.4","tailwindcss":"4.3.4"}}

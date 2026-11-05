@@ -1,0 +1,30 @@
+import {createServer} from 'node:http';
+import {timingSafeEqual} from 'node:crypto';
+import {WebSocketServer,WebSocket} from 'ws';
+import sharp from 'sharp';
+import {SmartSpectraSDK,breathingMetrics,cardioMetrics,PixelFormat,decodeMetrics} from '@smartspectra/node-sdk';
+import {normalizeMetrics} from './normalize.mjs';
+const {PRESAGE_API_KEY,BRIDGE_TOKEN,ALLOWED_ORIGIN}=process.env;
+if(!PRESAGE_API_KEY||!BRIDGE_TOKEN||BRIDGE_TOKEN.length<16||!ALLOWED_ORIGIN)throw new Error('Set PRESAGE_API_KEY, BRIDGE_TOKEN (16+ characters), and exact ALLOWED_ORIGIN.');
+const origin=new URL(ALLOWED_ORIGIN).origin;if(origin!==ALLOWED_ORIGIN)throw new Error('ALLOWED_ORIGIN must be an exact origin, without trailing slash.');
+const server=createServer((req,res)=>{res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify({service:'Spectra SDK bridge',sdk:SmartSpectraSDK.version,ready:true}));});
+const wss=new WebSocketServer({noServer:true,maxPayload:1024*1024});let occupied=false;
+server.on('upgrade',(req,socket,head)=>{if(req.headers.origin!==origin||occupied){socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');return}wss.handleUpgrade(req,socket,head,ws=>wss.emit('connection',ws,req));});
+wss.on('connection',ws=>{let sdk=null,authenticated=false,busy=false,started=0,closing=false,scale=1,lastTs=0;
+ const send=data=>{if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(data))};
+ const authTimeout=setTimeout(()=>ws.close(1008,'Authentication required'),5000);
+ const end=async()=>{if(closing)return;closing=true;clearTimeout(authTimeout);if(sdk){try{await sdk.stopAsync();await sdk.destroy()}catch{}sdk=null}if(authenticated)occupied=false};
+ ws.on('close',()=>void end());ws.on('error',()=>void end());
+ ws.on('message',async(data,binary)=>{if(closing)return;
+  if(!authenticated){if(binary){ws.close(1008,'Authenticate first');return}try{const msg=JSON.parse(data.toString());const a=Buffer.from(String(msg.token||'')),b=Buffer.from(BRIDGE_TOKEN);if(msg.type!=='start'||a.length!==b.length||!timingSafeEqual(a,b)||occupied){ws.close(1008,'Invalid credentials or bridge busy');return}occupied=true;authenticated=true;clearTimeout(authTimeout);
+   sdk=new SmartSpectraSDK({apiKey:PRESAGE_API_KEY,requestedMetrics:[...breathingMetrics,...cardioMetrics],enableTelemetry:false});
+   sdk.on('metrics',buf=>{const metrics=decodeMetrics(buf);if(Buffer.isBuffer(metrics)){send({type:'error',message:'SDK metrics decoder unavailable. Check installed SDK version.'});ws.close();return}const out=normalizeMetrics(metrics,(performance.now()-started)/1000);if(out.wave!==null){scale=Math.max(Math.abs(out.wave),scale*.995,.001);out.wave=Math.max(-1,Math.min(1,out.wave/scale))}send(out)});
+   sdk.on('validationStatus',(code,ts,hint)=>send({type:'validation',code,hint}));
+   sdk.on('error',(code,message)=>{send({type:'error',message:`SDK ${code}: ${message}`});ws.close()});
+   sdk.useCustomInput();started=performance.now();sdk.start();send({type:'ready'});
+  }catch{send({type:'error',message:'SDK initialization failed. Check the bridge console and API key.'});ws.close();await end()}return}
+  if(!binary||busy||!sdk)return;busy=true;try{const image=sharp(data,{limitInputPixels:640*480}).removeAlpha().toColourspace('srgb');const {data:rgb,info}=await image.raw().toBuffer({resolveWithObject:true});if(info.width!==640||info.height!==480||info.channels!==3)throw new Error('Expected 640×480 RGB');if(closing||!sdk)return;const ts=Math.max(lastTs+1,Math.round(performance.now()*1000));lastTs=ts;sdk.sendFrame(rgb,info.width,info.height,info.width*3,PixelFormat.kRGB,ts)}catch{send({type:'error',message:'Camera frame rejected by bridge.'});ws.close()}finally{busy=false}
+ });
+});
+const port=Number(process.env.PORT||8787);server.listen(port,process.env.HOST||'127.0.0.1',()=>console.log(`Spectra bridge listening on port ${port}; SDK ${SmartSpectraSDK.version}. No camera frames are persisted.`));
+process.on('SIGINT',()=>{for(const ws of wss.clients)ws.close();server.close();setTimeout(()=>process.exit(0),1500).unref()});
